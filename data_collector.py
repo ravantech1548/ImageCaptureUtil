@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import glob
 import time
+import platform
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -46,6 +47,13 @@ def save_frame(frame, folder, prefix, quality=95):
     cv2.imwrite(full_path, frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return filename
 
+def get_camera_backend():
+    """Returns the appropriate backend for the OS"""
+    if platform.system() == 'Windows':
+        return cv2.CAP_DSHOW # DirectShow is more robust on Windows
+    else:
+        return cv2.CAP_ANY # Auto-detect on Linux/Mac
+
 # --- Main App Layout ---
 st.title("📸 Native Data Collector")
 st.markdown("Use this tool to capture high-quality datasets using your local camera hardware.")
@@ -64,7 +72,7 @@ with st.sidebar:
     st.caption("Adjust the Red Box.")
     
     # Independent settings, no calibration needed for native window
-    cam_index = st.number_input("Camera Index (0=Default, 1=External)", value=0, step=1)
+    cam_index = st.number_input("Camera Index", value=0, step=1, help="Try 0, 1, or 2 if the camera doesn't open.")
     
     c1, c2 = st.columns(2)
     with c1:
@@ -90,28 +98,48 @@ st.divider()
 st.subheader("🚀 Live Capture Mode")
 st.write("""
 **Instructions:**
-1. Click the button below to open the **Native Camera Window**.
-2. Align your object inside the **Red Box**.
-3. Press **`s`** on your keyboard to **SAVE** (Flash Green).
-4. Press **`q`** to **QUIT** and return here.
+1. **Close any other apps** (like Zoom or Browser tabs) using the camera.
+2. Click the button below to open the **Native Camera Window**.
+3. Align your object inside the **Red Box**.
+4. Press **`s`** on your keyboard to **SAVE** (Flash Green).
+5. Press **`q`** to **QUIT** and return here.
 """)
 
 if st.button("Start Camera Window", type="primary"):
     # --- OPENCV NATIVE LOOP ---
-    cap = cv2.VideoCapture(cam_index)
     
+    # Use specific backend logic to fix "Could not open index 0"
+    backend = get_camera_backend()
+    cap = cv2.VideoCapture(cam_index, backend)
+    
+    # Try default backend if DSHOW fails on Windows
+    if not cap.isOpened() and platform.system() == 'Windows':
+         st.warning("DirectShow failed. Retrying with default backend...")
+         cap = cv2.VideoCapture(cam_index)
+
     if not cap.isOpened():
-        st.error(f"Could not open camera index {cam_index}. Check connections or try index 1.")
+        st.error(f"""
+        ❌ Could not open Camera Index {cam_index}. 
+        
+        **Troubleshooting:**
+        1. Is another app using the camera? (Close browser tabs, Zoom, etc.)
+        2. Try changing 'Camera Index' in the sidebar to 1 or 2.
+        3. Unplug and replug the camera.
+        """)
     else:
         st.toast("Camera Started! Look for the popup window.", icon="🎥")
         
         last_save_time = 0
         flash_duration = 0.2
         
+        # Optimize camera settings (optional, helps with lag)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
         while True:
             ret, frame = cap.read()
             if not ret:
-                st.error("Failed to read frame.")
+                st.error("Failed to read frame stream.")
                 break
                 
             h, w = frame.shape[:2]
