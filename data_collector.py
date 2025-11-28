@@ -2,8 +2,8 @@ import streamlit as st
 import os
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
 import glob
+import time
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -13,7 +13,6 @@ st.set_page_config(
 )
 
 # --- Helper Functions ---
-
 def get_next_sequence_number(folder_path, prefix):
     if not os.path.exists(folder_path):
         return 1
@@ -34,18 +33,22 @@ def get_next_sequence_number(folder_path, prefix):
             continue
     return max_num + 1
 
-def save_image(image_pil, folder, prefix, quality=95):
+def save_frame(frame, folder, prefix, quality=95):
+    """Saves the frame using OpenCV"""
     if not os.path.exists(folder):
         os.makedirs(folder, exist_ok=True)
+    
     seq_num = get_next_sequence_number(folder, prefix)
     filename = f"{prefix}_{seq_num:04d}.jpg"
     full_path = os.path.join(folder, filename)
-    image_pil.save(full_path, "JPEG", quality=quality)
-    return filename, seq_num
+    
+    # Write using OpenCV
+    cv2.imwrite(full_path, frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return filename
 
 # --- Main App Layout ---
-
-st.title("📸 Dataset Capture & Crop Tool")
+st.title("📸 Native Data Collector")
+st.markdown("Use this tool to capture high-quality datasets using your local camera hardware.")
 
 # Sidebar: Configurations
 with st.sidebar:
@@ -57,137 +60,98 @@ with st.sidebar:
     
     st.divider()
     
-    st.header("✂️ Crop & Overlay Config")
+    st.header("✂️ ROI Configuration")
+    st.caption("Adjust the Red Box.")
     
-    # Camera Calibration: Essential for aligning the CSS overlay with the actual camera pixels
-    with st.expander("⚙️ Camera Calibration (Important)", expanded=True):
-        st.caption("Set this to your camera's actual resolution so the red box overlay aligns correctly.")
-        # Added min_value to prevent division by zero
-        cam_w = st.number_input("Camera Width (px)", min_value=100, value=640, step=10)
-        cam_h = st.number_input("Camera Height (px)", min_value=100, value=480, step=10)
+    # Independent settings, no calibration needed for native window
+    cam_index = st.number_input("Camera Index (0=Default, 1=External)", value=0, step=1)
     
-    st.subheader("ROI Settings (Pixels)")
     c1, c2 = st.columns(2)
     with c1:
-        crop_width = st.number_input("Width", min_value=10, max_value=cam_w, value=300)
-        crop_height = st.number_input("Height", min_value=10, max_value=cam_h, value=300)
+        crop_w = st.number_input("Crop Width", value=300, step=10)
+        crop_h = st.number_input("Crop Height", value=300, step=10)
     with c2:
-        offset_x = st.number_input("X Offset", min_value=0, max_value=cam_w, value=170)
-        offset_y = st.number_input("Y Offset", min_value=0, max_value=cam_h, value=90)
+        off_x = st.number_input("X Offset", value=170, step=10)
+        off_y = st.number_input("Y Offset", value=90, step=10)
 
-# --- CSS Injection for Live Overlay ---
-# We calculate percentages to position the red box on the responsive camera widget
-pct_left = (offset_x / cam_w) * 100
-pct_top = (offset_y / cam_h) * 100
-pct_width = (crop_width / cam_w) * 100
-pct_height = (crop_height / cam_h) * 100
+# --- App Logic ---
 
-overlay_css = f"""
-<style>
-    /* Make the camera container relative */
-    div[data-testid="stCameraInput"] > label + div {{
-        position: relative;
-    }}
-    
-    /* Draw the red box on top of the video container */
-    div[data-testid="stCameraInput"] > label + div::after {{
-        content: '';
-        position: absolute;
-        top: {pct_top}%;
-        left: {pct_left}%;
-        width: {pct_width}%;
-        height: {pct_height}%;
-        border: 4px solid #FF0000; /* Red border */
-        z-index: 1000; /* High z-index */
-        pointer-events: none; /* Allow clicks to pass through */
-        box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5); /* Dim outside area */
-    }}
-    
-    .block-container {{ padding-top: 1rem; }}
-    div[data-testid="stMetric"] {{
-        background-color: #f0f2f6;
-        padding: 5px;
-        border-radius: 5px;
-    }}
-</style>
-"""
-st.markdown(overlay_css, unsafe_allow_html=True)
-
-# --- State Management ---
-if 'cam_id' not in st.session_state:
-    st.session_state.cam_id = 0
-if 'last_saved' not in st.session_state:
-    st.session_state.last_saved = None
-
-# --- Top Stats ---
+# Check stats
 current_seq = get_next_sequence_number(target_folder, class_name)
-col1, col2, col3 = st.columns([1, 1, 2])
-with col1:
-    st.metric("Next ID", f"#{current_seq:04d}")
-with col2:
-    count = len(glob.glob(os.path.join(target_folder, "*.jpg"))) if os.path.exists(target_folder) else 0
-    st.metric("Count", count)
-with col3:
-    if st.session_state.last_saved:
-        st.success(f"✅ Saved: {st.session_state.last_saved}")
+total_files = len(glob.glob(os.path.join(target_folder, "*.jpg"))) if os.path.exists(target_folder) else 0
 
-# --- Camera & Processing ---
-# Note: The CSS above draws the red box directly on this widget
-cam_key = f"camera_{st.session_state.cam_id}"
-camera_image = st.camera_input("Live Feed (Align object in red box)", key=cam_key)
+# Stats Bar
+col1, col2, col3 = st.columns(3)
+col1.metric("Next Sequence", f"#{current_seq:04d}")
+col2.metric("Total Collected", total_files)
 
-if camera_image:
-    # 1. Load & Process
-    img = Image.open(camera_image)
-    img_w, img_h = img.size
-    
-    # 2. Crop Logic - SCALING FIX
-    # Calculate ratio between 'Calibration' settings and Actual Image
-    # This ensures the crop happens exactly where the red box was, 
-    # even if the camera resolution is different from 640x480.
-    scale_x = img_w / cam_w
-    scale_y = img_h / cam_h
-    
-    real_x = int(offset_x * scale_x)
-    real_y = int(offset_y * scale_y)
-    real_w = int(crop_width * scale_x)
-    real_h = int(crop_height * scale_y)
-    
-    # Calculate safe bounds for crop
-    safe_x = max(0, min(real_x, img_w - 1))
-    safe_y = max(0, min(real_y, img_h - 1))
-    safe_w = max(1, min(real_w, img_w - safe_x))
-    safe_h = max(1, min(real_h, img_h - safe_y))
-    
-    img_cropped = img.crop((safe_x, safe_y, safe_x + safe_w, safe_y + safe_h))
+# Action Area
+st.divider()
+st.subheader("🚀 Live Capture Mode")
+st.write("""
+**Instructions:**
+1. Click the button below to open the **Native Camera Window**.
+2. Align your object inside the **Red Box**.
+3. Press **`s`** on your keyboard to **SAVE** (Flash Green).
+4. Press **`q`** to **QUIT** and return here.
+""")
 
-    # 3. Create Verification Image (Draw red box on static image)
-    img_with_box = img.copy()
-    draw = ImageDraw.Draw(img_with_box)
-    draw.rectangle([safe_x, safe_y, safe_x + safe_w, safe_y + safe_h], outline="red", width=5)
+if st.button("Start Camera Window", type="primary"):
+    # --- OPENCV NATIVE LOOP ---
+    cap = cv2.VideoCapture(cam_index)
     
-    # 4. Display Results & Actions
-    st.divider()
-    r_col1, r_col2, r_col3 = st.columns([1, 1, 1])
-    
-    with r_col1:
-        st.markdown("### 1. Capture Context")
-        st.image(img_with_box, caption=f"Full Frame ({img_w}x{img_h})", use_container_width=True)
+    if not cap.isOpened():
+        st.error(f"Could not open camera index {cam_index}. Check connections or try index 1.")
+    else:
+        st.toast("Camera Started! Look for the popup window.", icon="🎥")
         
-    with r_col2:
-        st.markdown("### 2. Crop Result")
-        st.image(img_cropped, caption=f"To be saved ({safe_w}x{safe_h})", width=250)
+        last_save_time = 0
+        flash_duration = 0.2
         
-    with r_col3:
-        st.markdown("### 3. Action")
-        st.write("Check the images. If correct, save.")
-        
-        # Save Button
-        if st.button("💾 Save & Clear Feed", type="primary", use_container_width=True):
-            filename, seq = save_image(img_cropped, target_folder, class_name)
-            st.session_state.last_saved = filename
-            st.session_state.cam_id += 1 # Increment ID to reset camera
-            st.rerun()
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("Failed to read frame.")
+                break
+                
+            h, w = frame.shape[:2]
             
-else:
-    st.info("👆 Use the red box guide above to align your object.")
+            # 1. Define ROI Coordinates (Safe)
+            x1 = min(off_x, w-1)
+            y1 = min(off_y, h-1)
+            x2 = min(off_x + crop_w, w)
+            y2 = min(off_y + crop_h, h)
+            
+            display_frame = frame.copy()
+            
+            # 2. Visual Feedback (Green flash if just saved)
+            if time.time() - last_save_time < flash_duration:
+                # Draw Green Box
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
+                cv2.putText(display_frame, "SAVED!", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            else:
+                # Draw Red Box
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            
+            # 3. Instructions Overlay
+            cv2.putText(display_frame, f"Seq: {get_next_sequence_number(target_folder, class_name):04d}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(display_frame, "Press 's' to SAVE | 'q' to QUIT", (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+            # 4. Show Window
+            cv2.imshow("Data Collector - Press 's' to Save", display_frame)
+            
+            # 5. Handle Key Press
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('q'):
+                break
+            elif key == ord('s'):
+                # Crop and Save original frame (not the one with drawings)
+                roi = frame[y1:y2, x1:x2]
+                saved_name = save_frame(roi, target_folder, class_name)
+                print(f"Saved {saved_name}")
+                last_save_time = time.time()
+
+        cap.release()
+        cv2.destroyAllWindows()
+        st.rerun() # Refresh page to update stats
