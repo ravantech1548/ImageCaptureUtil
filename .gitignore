@@ -1,0 +1,8 @@
+# Ignore Virtual Environment
+venv/
+
+# Ignore Collected Data
+dataset/
+
+# Ignore Python Cache
+__pycache__/
